@@ -467,11 +467,12 @@ $Report.Add("  Cache Clean: $(if ($needsCleanup) { 'Cleanup performed' } else { 
 $Report.Add("  DISM       : $dismResult")
 $Report.Add("  Report Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
 $Report.Add('')
-$Report.Add(if ($FailCount -gt 0) {
+$finalLine = if ($FailCount -gt 0) {
     "  *** $FailCount FAILURE(S) DETECTED -- review [FAIL] lines above ***"
 } else {
     '  All checks passed. No action required.'
-})
+}
+$Report.Add($finalLine)
 $Report.Add('')
 
 # ═════════════════════════════════════════════════════════════════════════════
