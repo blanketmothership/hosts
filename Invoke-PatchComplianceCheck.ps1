@@ -23,7 +23,7 @@
       3. Set the script parameters below via N-central's Input Parameters feature,
          OR hardcode defaults in the CONFIGURATION section.
       4. In the task's "Notification" tab enable "Send task output file in email" and
-         configure the recipient — N-central will attach/embed the script's stdout output,
+         configure the recipient - N-central will attach/embed the script's stdout output,
          which this script formats as a clean plain-text report.
 
     Required: PowerShell 5.1+, must run as SYSTEM or Administrator.
@@ -31,7 +31,7 @@
 #>
 
 # ============================================================
-#  CONFIGURATION — Override via N-central Input Parameters
+#  CONFIGURATION - Override via N-central Input Parameters
 #  or set defaults here.
 # ============================================================
 param(
@@ -55,7 +55,7 @@ function Write-Log {
     $line = "[$ts] [$Level] $Message"
     $Script:Log.Add($line)
     # Write-Output routes to stdout, which N-central captures as task output.
-    # Do NOT use Write-Host / Write-Warning / Write-Error here — those streams
+    # Do NOT use Write-Host / Write-Warning / Write-Error here - those streams
     # are not reliably captured by N-central's "Send task output file" feature.
     Write-Output $line
 }
@@ -69,7 +69,7 @@ function Set-Status {
 }
 
 # ============================================================
-#  SECTION 1 — SYSTEM INFORMATION
+#  SECTION 1 - SYSTEM INFORMATION
 # ============================================================
 function Get-SystemInfo {
     Write-Log "=== Collecting System Information ==="
@@ -97,7 +97,7 @@ function Get-SystemInfo {
 }
 
 # ============================================================
-#  SECTION 2a — ESU LICENSE CHECK
+#  SECTION 2a - ESU LICENSE CHECK
 #  Detects valid Extended Security Update licenses via three
 #  methods (slmgr, registry, WMI) and returns a structured
 #  result.  Called from Test-WindowsEOL so it can override
@@ -179,9 +179,9 @@ function Get-ESULicenseStatus {
     $today     = (Get-Date).Date
     $caption   = $os.Caption
 
-    # Server 2019 shares build 17763 — skip ESU check for it (still in mainstream)
+    # Server 2019 shares build 17763 - skip ESU check for it (still in mainstream)
     if ($build -eq "17763" -and $caption -match "Server 2019") {
-        Write-Log "  Build 17763 is Windows Server 2019 (mainstream support) — ESU not applicable."
+        Write-Log "  Build 17763 is Windows Server 2019 (mainstream support) - ESU not applicable."
         $esuResult.ESUDetails = "Server 2019 is in mainstream support; ESU not required."
         $Script:Results["ESU"] = $esuResult
         return $esuResult
@@ -199,7 +199,7 @@ function Get-ESULicenseStatus {
     Write-Log "  OS is ESU-eligible: $($esuEntry.Label)"
 
     # ----------------------------------------------------------------
-    # METHOD 1 — SoftwareLicensingProduct (WMI/CIM)
+    # METHOD 1 - SoftwareLicensingProduct (WMI/CIM)
     #   Microsoft publishes ESU SKU Application IDs.  We search for
     #   any product whose name contains "Extended Security" and whose
     #   LicenseStatus = 1 (Licensed).
@@ -236,7 +236,7 @@ function Get-ESULicenseStatus {
     }
 
     # ----------------------------------------------------------------
-    # METHOD 2 — Registry sentinel keys written by MAK / Azure Arc ESU
+    # METHOD 2 - Registry sentinel keys written by MAK / Azure Arc ESU
     #   HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Server\ESU
     #   HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\ESU
     # ----------------------------------------------------------------
@@ -270,7 +270,7 @@ function Get-ESULicenseStatus {
                 }
             }
             catch {
-                Write-Log "  [Method 2] Could not read $regPath — $_" -Level "WARN"
+                Write-Log "  [Method 2] Could not read $regPath - $_" -Level "WARN"
             }
         }
     }
@@ -280,7 +280,7 @@ function Get-ESULicenseStatus {
     }
 
     # ----------------------------------------------------------------
-    # METHOD 3 — slmgr.vbs /dlv output (fallback text parse)
+    # METHOD 3 - slmgr.vbs /dlv output (fallback text parse)
     #   Captures slmgr output and looks for "Extended Security" lines.
     #   Slower (~5s) but catches edge cases missed by Methods 1 & 2.
     # ----------------------------------------------------------------
@@ -332,7 +332,7 @@ function Get-ESULicenseStatus {
             $esuResult.ESUExpiryDate  = $validYear.Value.ToString("yyyy-MM-dd")
             $esuResult.ESULicenseValid = $true
             $esuResult.OverridesEOL   = $true
-            Write-Log ("  ESU license is VALID — {0} coverage through {1}" -f
+            Write-Log ("  ESU license is VALID - {0} coverage through {1}" -f
                 $validYear.Key, $validYear.Value.ToString("yyyy-MM-dd"))
         } else {
             # License was active but all ESU years have expired
@@ -350,7 +350,7 @@ function Get-ESULicenseStatus {
     }
 
     $esuResult.ESUDetails = if ($esuResult.ESULicenseValid) {
-        "Valid $($esuResult.ESUYear) ESU license active via $($esuResult.ESUActivationMethod) — expires $($esuResult.ESUExpiryDate)"
+        "Valid $($esuResult.ESUYear) ESU license active via $($esuResult.ESUActivationMethod) - expires $($esuResult.ESUExpiryDate)"
     } elseif ($esuResult.ESULicenseFound) {
         "ESU license found but is NOT active or has expired."
     } else {
@@ -363,7 +363,7 @@ function Get-ESULicenseStatus {
 }
 
 # ============================================================
-#  SECTION 2b — EOL CHECK (calls ESU check internally)
+#  SECTION 2b - EOL CHECK (calls ESU check internally)
 #  Source: Microsoft lifecycle pages (encoded here for offline use)
 #  Build numbers map to support end dates.
 #  Update this table annually or replace with an API call.
@@ -406,7 +406,7 @@ function Test-WindowsEOL {
     $today     = (Get-Date).Date
     $eolResult = [ordered]@{}
 
-    # ---- Run ESU check first — result can override IsEOL below ----
+    # ---- Run ESU check first - result can override IsEOL below ----
     $esuInfo = Get-ESULicenseStatus
 
     if ($lifecycleTable.ContainsKey($BuildNumber)) {
@@ -439,13 +439,13 @@ function Test-WindowsEOL {
                 $esuInfo.ESUYear, $esuInfo.ESUExpiryDate) -Level "WARN"
             Set-Status "WARN"   # Raise a WARN so admins know ESU is in play
         } elseif ($daysLeft -le 90) {
-            Write-Log "  WARNING: OS approaching EOL in $daysLeft days — $productName" -Level "WARN"
+            Write-Log "  WARNING: OS approaching EOL in $daysLeft days - $productName" -Level "WARN"
             Set-Status "WARN"
         } else {
-            Write-Log "  OS is supported: $productName — $daysLeft days remaining"
+            Write-Log "  OS is supported: $productName - $daysLeft days remaining"
         }
     } else {
-        # Build not in table — may be a newer release; treat as supported but flag it
+        # Build not in table - may be a newer release; treat as supported but flag it
         $eolResult = [ordered]@{
             ProductName      = "Unknown (Build $BuildNumber)"
             BuildNumber      = $BuildNumber
@@ -456,7 +456,7 @@ function Test-WindowsEOL {
             ESUExpiryDate    = "N/A"
             IsEOL            = $false
         }
-        Write-Log "  Build $BuildNumber not found in EOL table — treating as Supported (verify manually)" -Level "WARN"
+        Write-Log "  Build $BuildNumber not found in EOL table - treating as Supported (verify manually)" -Level "WARN"
         Set-Status "WARN"
     }
 
@@ -465,13 +465,13 @@ function Test-WindowsEOL {
 }
 
 # ============================================================
-#  SECTION 3 — LAST CUMULATIVE UPDATE CHECK
+#  SECTION 3 - LAST CUMULATIVE UPDATE CHECK
 #  Excludes Servicing Stack Updates (SSU) by title keyword.
 # ============================================================
 function Get-LastCumulativeUpdate {
     Write-Log "=== Checking Last Installed Cumulative Update ==="
 
-    # Keywords that identify SSUs — excluded from LCU check
+    # Keywords that identify SSUs - excluded from LCU check
     $ssuPatterns = @(
         "Servicing Stack",
         "Servicing stack",
@@ -537,10 +537,10 @@ function Get-LastCumulativeUpdate {
         $lcuResult.WithinThreshold = ($installedDate -ge $cutoffDate)
 
         if ($lcuResult.WithinThreshold) {
-            Write-Log ("  PASS — Last LCU: {0} installed {1} days ago ({2})" -f
+            Write-Log ("  PASS - Last LCU: {0} installed {1} days ago ({2})" -f
                 $latest.HotFixID, $daysAgo, $installedDate.ToString("yyyy-MM-dd"))
         } else {
-            Write-Log ("  FAIL — Last LCU: {0} installed {1} days ago — exceeds {2}-day threshold!" -f
+            Write-Log ("  FAIL - Last LCU: {0} installed {1} days ago - exceeds {2}-day threshold!" -f
                 $latest.HotFixID, $daysAgo, $PatchStaleDays) -Level "WARN"
             Set-Status "WARN"
         }
@@ -554,7 +554,7 @@ function Get-LastCumulativeUpdate {
 }
 
 # ============================================================
-#  SECTION 3b — SYSTEM DISK FREE SPACE CHECK
+#  SECTION 3b - SYSTEM DISK FREE SPACE CHECK
 #  Verifies the system drive (typically C:) has at least
 #  $MinFreeGB free before attempting any update operations.
 #  Flags WARN if space is low but above the hard floor, FAIL
@@ -603,19 +603,19 @@ function Test-DiskSpace {
 
         if ($freeGB -ge $MinFreeGB) {
             $diskResult.Status = "PASS"
-            Write-Log ("  PASS — Drive {0}: {1} GB free of {2} GB total ({3}% free)" -f
+            Write-Log ("  PASS - Drive {0}: {1} GB free of {2} GB total ({3}% free)" -f
                 $sysDrive, $freeGB, $totalGB, $pctFree)
         } elseif ($freeGB -ge ($MinFreeGB * 0.75)) {
-            # Between 75% and 100% of minimum — warn but allow remediation to proceed
+            # Between 75% and 100% of minimum - warn but allow remediation to proceed
             $diskResult.Status = "WARN"
-            Write-Log ("  WARN — Drive {0}: only {1} GB free (minimum {2} GB). " +
+            Write-Log ("  WARN - Drive {0}: only {1} GB free (minimum {2} GB). " +
                 "Remediation will proceed but space is tight." -f
                 $sysDrive, $freeGB, $MinFreeGB) -Level "WARN"
             Set-Status "WARN"
         } else {
-            # Below 75% of the minimum — too low to safely attempt updates
+            # Below 75% of the minimum - too low to safely attempt updates
             $diskResult.Status = "FAIL"
-            Write-Log ("  FAIL — Drive {0}: only {1} GB free. Minimum {2} GB required. " +
+            Write-Log ("  FAIL - Drive {0}: only {1} GB free. Minimum {2} GB required. " +
                 "Remediation will be SKIPPED to avoid a failed or partial update." -f
                 $sysDrive, $freeGB, $MinFreeGB) -Level "ERROR"
             Set-Status "FAIL"
@@ -632,17 +632,17 @@ function Test-DiskSpace {
 }
 
 # ============================================================
-#  SECTION 3c — WINDOWS UPDATE SERVICES STATUS CHECK
+#  SECTION 3c - WINDOWS UPDATE SERVICES STATUS CHECK
 #  Validates that all services required for Windows Update
 #  are present, running (or set to an acceptable start type),
 #  and that the WUA COM object is reachable.
 #  Services checked:
-#    wuauserv  — Windows Update
-#    bits      — Background Intelligent Transfer Service
-#    cryptsvc  — Cryptographic Services
-#    trustedinstaller — Windows Modules Installer
-#    msiserver — Windows Installer  (advisory only)
-#    dosvc     — Delivery Optimization (advisory only)
+#    wuauserv  - Windows Update
+#    bits      - Background Intelligent Transfer Service
+#    cryptsvc  - Cryptographic Services
+#    trustedinstaller - Windows Modules Installer
+#    msiserver - Windows Installer  (advisory only)
+#    dosvc     - Delivery Optimization (advisory only)
 # ============================================================
 function Test-WindowsUpdateServices {
     Write-Log "=== Checking Windows Update Service Health ==="
@@ -701,13 +701,13 @@ function Test-WindowsUpdateServices {
                 Write-Log ("  OK       {0,-20} : Stopped/on-demand (advisory service)" -f $svcName)
             } elseif ($svc.StartType -eq 'Disabled') {
                 $row.Healthy = $false
-                $row.Note    = "DISABLED — must be re-enabled"
+                $row.Note    = "DISABLED - must be re-enabled"
                 Write-Log ("  {0} {1,-20} : DISABLED" -f $(if ($mandatory) {"FAIL    "} else {"WARN    "}), $svcName) -Level $(if ($mandatory) {"ERROR"} else {"WARN"})
                 if ($mandatory) { $allMandatoryOk = $false; Set-Status "FAIL" } else { Set-Status "WARN" }
             } else {
                 $row.Healthy = $false
                 $row.Note    = "Stopped unexpectedly (StartType: $($svc.StartType))"
-                Write-Log ("  {0} {1,-20} : Stopped — StartType={2}" -f $(if ($mandatory) {"FAIL    "} else {"WARN    "}), $svcName, $svc.StartType) -Level "WARN"
+                Write-Log ("  {0} {1,-20} : Stopped - StartType={2}" -f $(if ($mandatory) {"FAIL    "} else {"WARN    "}), $svcName, $svc.StartType) -Level "WARN"
                 if ($mandatory) { $allMandatoryOk = $false; Set-Status "WARN" }
             }
         }
@@ -719,7 +719,7 @@ function Test-WindowsUpdateServices {
                 Write-Log ("  FAIL     {0,-20} : Not found / query error" -f $svcName) -Level "ERROR"
                 Set-Status "FAIL"
             } else {
-                Write-Log ("  WARN     {0,-20} : Not found (advisory — may not be installed)" -f $svcName) -Level "WARN"
+                Write-Log ("  WARN     {0,-20} : Not found (advisory - may not be installed)" -f $svcName) -Level "WARN"
             }
         }
 
@@ -733,7 +733,7 @@ function Test-WindowsUpdateServices {
     try {
         $session      = New-Object -ComObject Microsoft.Update.Session -ErrorAction Stop
         $searcher     = $session.CreateUpdateSearcher()
-        # A lightweight call — just verify the object responds, don't run a full search
+        # A lightweight call - just verify the object responds, don't run a full search
         $null         = $searcher.GetTotalHistoryCount()
         $wuaReachable = $true
         $wuaNote      = "COM object responding normally"
@@ -741,7 +741,7 @@ function Test-WindowsUpdateServices {
     }
     catch {
         $wuaNote = "COM object unreachable: $_"
-        Write-Log "  WARN     WUA COM object is NOT reachable — $_" -Level "WARN"
+        Write-Log "  WARN     WUA COM object is NOT reachable - $_" -Level "WARN"
         Set-Status "WARN"
     }
 
@@ -758,18 +758,18 @@ function Test-WindowsUpdateServices {
 }
 
 # ============================================================
-#  SECTION 3d — PENDING REBOOT CHECK
+#  SECTION 3d - PENDING REBOOT CHECK
 #  Inspects every registry location and file-rename queue that
 #  Windows uses to signal a reboot is required.  A pending
 #  reboot before patching can cause update failures, stuck
 #  installations, or CBS corruption.
 #
 #  Sources checked:
-#    CBS  — Component Based Servicing (DISM/SFC repairs)
-#    WU   — Windows Update client
-#    PFR  — PendingFileRenameOperations (in-use file swaps)
-#    SCCM — ConfigMgr client (if present)
-#    Join — Domain join / computer rename pending
+#    CBS  - Component Based Servicing (DISM/SFC repairs)
+#    WU   - Windows Update client
+#    PFR  - PendingFileRenameOperations (in-use file swaps)
+#    SCCM - ConfigMgr client (if present)
+#    Join - Domain join / computer rename pending
 # ============================================================
 function Test-PendingReboot {
     Write-Log "=== Checking Pending Reboot State ==="
@@ -895,14 +895,14 @@ function Test-PendingReboot {
 }
 
 # ============================================================
-#  SECTION 3e — SYSTEM UPTIME CHECK
+#  SECTION 3e - SYSTEM UPTIME CHECK
 #  Long uptimes indicate the system has not rebooted to finish
 #  applying previous patches, may have deferred WU state, or
 #  could be carrying stale drivers/in-memory state.
 #  Thresholds:
-#    <= 30 days  — PASS  (normal operations)
-#    31-60 days  — WARN  (patching will likely work; reboot overdue)
-#    >  60 days  — FAIL  (high risk; reboot strongly recommended first)
+#    <= 30 days  - PASS  (normal operations)
+#    31-60 days  - WARN  (patching will likely work; reboot overdue)
+#    >  60 days  - FAIL  (high risk; reboot strongly recommended first)
 # ============================================================
 function Test-SystemUptime {
     param(
@@ -945,7 +945,7 @@ function Test-SystemUptime {
             Write-Log "  WARN: Uptime $formatted exceeds ${WarnDays}-day warning threshold." -Level "WARN"
             Set-Status "WARN"
         } else {
-            $uptimeResult.Status = "WARN"   # WARN not FAIL — high uptime is a risk, not a hard blocker
+            $uptimeResult.Status = "WARN"   # WARN not FAIL - high uptime is a risk, not a hard blocker
             $uptimeResult.Note   = "Uptime exceeds ${FailDays}d. Reboot strongly recommended before patching."
             Write-Log "  WARN: Uptime $formatted exceeds ${FailDays}-day critical threshold. Reboot before patching." -Level "ERROR"
             Set-Status "WARN"
@@ -962,7 +962,7 @@ function Test-SystemUptime {
 }
 
 # ============================================================
-#  SECTION 3f — TIME SYNC / CLOCK ACCURACY CHECK
+#  SECTION 3f - TIME SYNC / CLOCK ACCURACY CHECK
 #  Windows Update, Kerberos, TLS certificate validation, and
 #  WSUS all require accurate system time.  Kerberos rejects
 #  tickets with > 5 minutes skew; TLS validation fails on
@@ -978,7 +978,7 @@ function Test-SystemUptime {
 function Test-TimeSync {
     param(
         [int]$WarnOffsetSeconds = 60,
-        [int]$FailOffsetSeconds = 300    # 5 minutes — Kerberos hard limit
+        [int]$FailOffsetSeconds = 300    # 5 minutes - Kerberos hard limit
     )
 
     Write-Log "=== Checking Time Synchronisation ==="
@@ -1002,7 +1002,7 @@ function Test-TimeSync {
         $timeResult.W32tmServiceRunning = ($w32tm.Status -eq 'Running')
 
         if (-not $timeResult.W32tmServiceRunning) {
-            Write-Log "  WARN: W32Time service is not running (Status: $($w32tm.Status)) — attempting start." -Level "WARN"
+            Write-Log "  WARN: W32Time service is not running (Status: $($w32tm.Status)) - attempting start." -Level "WARN"
             Set-Status "WARN"
             try {
                 Start-Service W32Time -ErrorAction Stop
@@ -1011,7 +1011,7 @@ function Test-TimeSync {
                 Write-Log "  W32Time service started successfully."
             }
             catch {
-                Write-Log "  Could not start W32Time: $_ — skipping offset measurement." -Level "WARN"
+                Write-Log "  Could not start W32Time: $_ - skipping offset measurement." -Level "WARN"
                 $timeResult.Status = "WARN"
                 $timeResult.Note   = "W32Time service could not be started. Time accuracy unknown."
                 $Script:Results["TimeSync"] = $timeResult
@@ -1049,7 +1049,7 @@ function Test-TimeSync {
     }
     catch { Write-Log "  w32tm /query /status failed: $_" -Level "WARN" }
 
-    # ---- Step 3: w32tm /stripchart — measure actual offset ----
+    # ---- Step 3: w32tm /stripchart - measure actual offset ----
     try {
         $stripText = (& w32tm.exe /stripchart /computer:$($timeResult.NTPSource) `
                          /samples:1 /dataonly 2>&1) -join "`n"
@@ -1100,10 +1100,10 @@ function Test-TimeSync {
 }
 
 # ============================================================
-#  SECTION 4 — REMEDIATION (only if OS is NOT EOL)
+#  SECTION 4 - REMEDIATION (only if OS is NOT EOL)
 # ============================================================
 
-# 4a — Clear stale Windows Update cache
+# 4a - Clear stale Windows Update cache
 function Clear-WindowsUpdateCache {
     Write-Log "=== Clearing Stale Windows Update Cache ==="
     $cacheResult = [ordered]@{ Success = $false; Details = "" }
@@ -1158,7 +1158,7 @@ function Clear-WindowsUpdateCache {
     return $cacheResult
 }
 
-# 4b — Run DISM RestoreHealth
+# 4b - Run DISM RestoreHealth
 function Invoke-DISMRestoreHealth {
     Write-Log "=== Running DISM /Online /Cleanup-Image /RestoreHealth ==="
     $dismResult = [ordered]@{ ExitCode = -1; Success = $false; Output = "" }
@@ -1201,9 +1201,9 @@ function Invoke-DISMRestoreHealth {
     return $dismResult
 }
 
-# 4c — Trigger Windows Update download (newest patches)
+# 4c - Trigger Windows Update download (newest patches)
 function Invoke-WindowsUpdateDownload {
-    Write-Log "=== Triggering Windows Update — Downloading Newest Patches ==="
+    Write-Log "=== Triggering Windows Update - Downloading Newest Patches ==="
     $wuResult = [ordered]@{
         Method          = "Unknown"
         UpdatesFound    = 0
@@ -1299,7 +1299,7 @@ function Invoke-WindowsUpdateDownload {
 }
 
 # ============================================================
-#  SECTION 5 — FORMAT & EMIT REPORT TO STDOUT
+#  SECTION 5 - FORMAT & EMIT REPORT TO STDOUT
 #
 #  N-central's "Send task output file in email" captures
 #  everything written to stdout (Write-Output / pipeline).
@@ -1580,36 +1580,36 @@ function Write-ComplianceReport {
 #  MAIN EXECUTION
 # ============================================================
 Write-Log "############################################################"
-Write-Log " Invoke-PatchComplianceCheck — Starting"
+Write-Log " Invoke-PatchComplianceCheck - Starting"
 Write-Log " N-central Patch Compliance & Remediation Script"
 Write-Log "############################################################"
 
 try {
-    # Step 1 — System info
+    # Step 1 - System info
     $sysInfo = Get-SystemInfo
 
-    # Step 2 — EOL check (includes ESU sub-check)
+    # Step 2 - EOL check (includes ESU sub-check)
     $eolInfo = Test-WindowsEOL -BuildNumber $sysInfo.OS_BuildNumber
 
-    # Step 3 — LCU check (always run — audit data regardless of EOL/remediation state)
+    # Step 3 - LCU check (always run - audit data regardless of EOL/remediation state)
     $lcuInfo = Get-LastCumulativeUpdate
 
-    # Step 3b — Disk space check (always run — needed before any remediation)
+    # Step 3b - Disk space check (always run - needed before any remediation)
     $diskInfo = Test-DiskSpace -MinFreeGB 25
 
-    # Step 3c — Windows Update services health check (always run)
+    # Step 3c - Windows Update services health check (always run)
     $wuSvcInfo = Test-WindowsUpdateServices
 
-    # Step 3d — Pending reboot check (always run)
+    # Step 3d - Pending reboot check (always run)
     $rebootInfo = Test-PendingReboot
 
-    # Step 3e — System uptime check (always run)
+    # Step 3e - System uptime check (always run)
     $uptimeInfo = Test-SystemUptime -WarnDays 30 -FailDays 60
 
-    # Step 3f — Time sync / clock accuracy check (always run)
+    # Step 3f - Time sync / clock accuracy check (always run)
     $timeSyncInfo = Test-TimeSync -WarnOffsetSeconds 60 -FailOffsetSeconds 300
 
-    # Step 4 — Remediation block
+    # Step 4 - Remediation block
     # Gates: OS must not be EOL (or must have valid ESU), remediation must be enabled,
     #        disk must meet minimum free space, and mandatory WU services must be healthy.
     $diskOkForRemediation     = ($diskInfo.Status -in @("PASS", "WARN"))   # WARN = tight but proceed
@@ -1619,25 +1619,25 @@ try {
 
     if (-not $eolInfo.IsEOL -and $AttemptRemediation) {
         if (-not $diskOkForRemediation) {
-            Write-Log ("=== Remediation SKIPPED — Insufficient disk space: {0} GB free, {1} GB required ===" -f
+            Write-Log ("=== Remediation SKIPPED - Insufficient disk space: {0} GB free, {1} GB required ===" -f
                 $diskInfo.FreeGB, $diskInfo.MinRequiredGB) -Level "ERROR"
             Set-Status "FAIL"
         } elseif (-not $servicesOkForRemediation) {
-            Write-Log "=== Remediation SKIPPED — One or more mandatory Windows Update services are not healthy ===" -Level "ERROR"
+            Write-Log "=== Remediation SKIPPED - One or more mandatory Windows Update services are not healthy ===" -Level "ERROR"
             Write-Log "    Resolve service issues before re-running remediation." -Level "WARN"
             Set-Status "FAIL"
         } elseif (-not $rebootOkForRemediation) {
-            Write-Log "=== Remediation SKIPPED — A reboot is pending. Reboot the system first to avoid update conflicts. ===" -Level "WARN"
+            Write-Log "=== Remediation SKIPPED - A reboot is pending. Reboot the system first to avoid update conflicts. ===" -Level "WARN"
             Write-Log ("    Pending sources: {0}" -f ($rebootInfo.Sources -join "; ")) -Level "WARN"
             Set-Status "WARN"
         } elseif (-not $timeSyncOkForRemediation) {
-            Write-Log "=== Remediation SKIPPED — Clock offset exceeds Kerberos limit (${($timeSyncInfo.OffsetFormatted)}). Run 'w32tm /resync /force' first. ===" -Level "ERROR"
+            Write-Log "=== Remediation SKIPPED - Clock offset exceeds Kerberos limit (${($timeSyncInfo.OffsetFormatted)}). Run 'w32tm /resync /force' first. ===" -Level "ERROR"
             Set-Status "FAIL"
         } else {
             if ($eolInfo.RawEOL -and $eolInfo.ESUOverride) {
-                Write-Log "=== OS is past standard EOS but covered by valid ESU — proceeding with remediation ==="
+                Write-Log "=== OS is past standard EOS but covered by valid ESU - proceeding with remediation ==="
             } else {
-                Write-Log "=== OS is within standard lifecycle — proceeding with remediation steps ==="
+                Write-Log "=== OS is within standard lifecycle - proceeding with remediation steps ==="
             }
             if ($diskInfo.Status -eq "WARN") {
                 Write-Log ("  NOTE: Disk space is below recommended ({0} GB free). Proceeding with caution." -f
@@ -1648,10 +1648,10 @@ try {
             Invoke-WindowsUpdateDownload
         }
     } elseif ($eolInfo.IsEOL) {
-        Write-Log "=== Remediation SKIPPED — OS is End of Life with no valid ESU. Manual upgrade required. ===" -Level "WARN"
+        Write-Log "=== Remediation SKIPPED - OS is End of Life with no valid ESU. Manual upgrade required. ===" -Level "WARN"
         Set-Status "FAIL"
     } else {
-        Write-Log "=== Remediation SKIPPED — AttemptRemediation is set to false (audit mode) ==="
+        Write-Log "=== Remediation SKIPPED - AttemptRemediation is set to false (audit mode) ==="
     }
 }
 catch {
@@ -1659,7 +1659,7 @@ catch {
     Set-Status "FAIL"
 }
 
-# Step 5 — Emit formatted report to stdout (captured by N-central as task output)
+# Step 5 - Emit formatted report to stdout (captured by N-central as task output)
 Write-Log "############################################################"
 Write-Log " Final Status: $Script:OverallStatus"
 Write-Log "############################################################"
