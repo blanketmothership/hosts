@@ -22,11 +22,13 @@
         The script will refuse to run with exit code 2 on these.
 
 .DESCRIPTION
-    PHASE 1 - CHECK (inherited verbatim from Invoke-PatchComplianceCheckV13)
-        - System info, ESU license, EOL/lifecycle, last LCU, disk space,
-          WU services, pending reboot, uptime, time sync, TPM version.
+    PHASE 1 - CHECK (inherited from Invoke-PatchComplianceCheckV13;
+    LCU check enhanced with BookkeepingHealthy / DataSource signals)
+        - System info, ESU license, EOL/lifecycle, last LCU + bookkeeping
+          health, disk space, WU services, pending reboot, uptime, time
+          sync, TPM version.
 
-    PHASE 2 - REMEDIATE (always runs; this script's purpose is to fix things)
+    PHASE 2 - REMEDIATE (always runs)
         Pre-flight:
           * Detect server vs workstation, domain controller, WSUS-managed
           * Install PSWindowsUpdate from PSGallery if missing
@@ -34,25 +36,26 @@
 
         Aggressive WU remediation:
           * Disk cleanup (DISM StartComponentCleanup, %TEMP% prune)
-          * Service health (start required services if stopped)
+          * Service health (start required services if stopped; respects
+            existing StartType - never downgrades Automatic to Manual)
           * Full WU component reset
               - stop wuauserv/bits/cryptsvc/msiserver/appidsvc
               - rename SoftwareDistribution and catroot2 with .bak-<timestamp>
               - clear BITS qmgr*.dat
-              - re-register WU/COM DLLs (regsvr32 /s)
+              - re-register WU/COM DLLs (regsvr32 /s) with per-DLL logging
               - reset WinHTTP proxy (skipped if a proxy is configured)
               - restart services
           * Pending pending.xml >30 days old: rename
           * Time sync: w32tm /resync /force (skipped on DCs)
           * Component store repair: DISM CheckHealth, ScanHealth,
-            RestoreHealth (only if damage detected), then sfc /scannow
+            RestoreHealth (only if damage detected). SFC /scannow only
+            runs if DISM found damage; pass -ForceSfc to override.
           * Force fresh WU detection (PSWindowsUpdate or UsoClient/wuauclt)
 
         WSUS / N-central PME safe:
             Never modifies HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate.
 
-        Never reboots. If a remediation step requires reboot to take effect,
-        the report flags it as REBOOT REQUIRED. Operator/N-central handles it.
+        Never reboots.
 
     PHASE 3 - RE-CHECK
         Re-runs the Test-* functions that originally returned WARN or FAIL
@@ -60,9 +63,12 @@
 
     REPORT
         Same V13-style plain-text report, plus:
-          * REMEDIATIONS APPLIED section
+          * REMEDIATIONS APPLIED with per-step duration
           * BEFORE / AFTER comparison
           * Footer reflects PASS / REMEDIATED / PARTIAL / FAIL
+        Mirrored to C:\Windows\Temp\Remediate-PatchCompliance-<host>-<ts>.log
+        via Start-Transcript so the full report survives N-central output
+        truncation.
 
 .NOTES
     Exit codes (for N-central):
@@ -72,7 +78,9 @@
 
     Author  : commander
     Repo    : https://github.com/blanketmothership/hosts
-    Version : v2  (adds OS gate; refuses to run on Win 7 / Server 2008 / 2008 R2)
+    Version : v3  (reliability + observability pass after first prod run)
+              v2  (added OS gate; refuses Win 7 / Server 2008 / 2008 R2)
+              v1  (initial)
 #>
 
 # ============================================================
@@ -86,7 +94,8 @@ param(
     [int]    $TimeSyncWarnSec   = 60,
     [int]    $TimeSyncFailSec   = 300,
     [int]    $PendingXmlAgeDays = 30,
-    [switch] $SkipRecheck
+    [switch] $SkipRecheck,
+    [switch] $ForceSfc           # Run SFC /scannow even when DISM ScanHealth reports no damage
 )
 
 # ============================================================
@@ -120,6 +129,7 @@ $Script:Environment    = [ordered]@{
     WsusManaged          = $false
     HasPSWindowsUpdate   = $false
     RegBackupPath        = $null
+    TranscriptPath       = $null
     RemediationStartTime = $null
     RemediationEndTime   = $null
 }
@@ -147,39 +157,42 @@ function Set-Status {
 }
 
 # ============================================================
-#  HELPER: Add-Remediation
+#  HELPER: Add-Remediation (records each remediation attempt)
+#  V3: optional -DurationSec for long-running steps
 # ============================================================
 function Add-Remediation {
     param(
         [string]$Step,
         [ValidateSet("OK","FAILED","SKIPPED","INFO")] [string]$Result,
         [string]$Detail = "",
-        [string]$ErrorMessage = ""
+        [string]$ErrorMessage = "",
+        [double]$DurationSec = 0
     )
     $entry = [ordered]@{
-        Step   = $Step
-        Result = $Result
-        Detail = $Detail
-        Error  = $ErrorMessage
-        Time   = Get-Date -Format "HH:mm:ss"
+        Step     = $Step
+        Result   = $Result
+        Detail   = $Detail
+        Error    = $ErrorMessage
+        Duration = $DurationSec
+        Time     = Get-Date -Format "HH:mm:ss"
     }
     $Script:Remediations.Add([pscustomobject]$entry) | Out-Null
 
     $level = switch ($Result) { "FAILED" {"ERROR"} "SKIPPED" {"WARN"} default {"REMEDIATE"} }
-    $msg   = "[REMEDIATION] $Step -> $Result" + $(if ($Detail) {"  ($Detail)"} else {""}) + $(if ($ErrorMessage) {"  ERR: $ErrorMessage"} else {""})
+    $durStr = if ($DurationSec -gt 0) {
+        if ($DurationSec -ge 60) { "  ({0:N0}m{1:N0}s)" -f [math]::Floor($DurationSec/60), ($DurationSec%60) }
+        else                      { "  ({0:N0}s)" -f $DurationSec }
+    } else { "" }
+    $msg = "[REMEDIATION] $Step -> $Result$durStr" + $(if ($Detail) {"  ($Detail)"} else {""}) + $(if ($ErrorMessage) {"  ERR: $ErrorMessage"} else {""})
     Write-Log $msg -Level $level
 }
 
 # ============================================================
 #  HELPER: Test-SupportedOS
-#  Hard gate that refuses to run on Windows 7 / Server 2008 / 2008 R2
-#  (and anything older). The minimum supported build is 9200
-#  (Windows Server 2012 / Windows 8). Below that we emit a minimal
-#  report and exit with code 2 (FAIL) so N-central flags the task.
 # ============================================================
 function Test-SupportedOS {
     Write-Log "=== OS gate: verifying supported Windows version ==="
-    $minBuild = 9200   # Windows Server 2012 / Windows 8
+    $minBuild = 9200
 
     try {
         $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
@@ -630,6 +643,9 @@ function Get-LastCumulativeUpdate {
     )
 
     $cutoffDate   = (Get-Date).AddDays(-$PatchStaleDays)
+    $dataSource   = "None"   # V3: tracks which lookup method produced the result
+    $hotfixCount  = 0        # V3: total LCUs visible to Get-HotFix
+    $wmiCount     = 0        # V3: total LCUs visible to Win32_QuickFixEngineering
     $hotfixHistory = @(Get-HotFix | Where-Object { $_.InstalledOn -ne $null })
 
     # Filter: must match an LCU pattern AND must NOT match an SSU pattern
@@ -642,6 +658,8 @@ function Get-LastCumulativeUpdate {
 
         ($matchesLCU.Count -gt 0) -and ($isSSU.Count -eq 0)
     } | Sort-Object InstalledOn -Descending)
+    $hotfixCount = $lcuHistory.Count
+    if ($hotfixCount -gt 0) { $dataSource = "Get-HotFix" }
 
     # Fallback 1: Win32_QuickFixEngineering (sometimes has descriptions Get-HotFix lacks)
     if ($lcuHistory.Count -eq 0) {
@@ -653,6 +671,21 @@ function Get-LastCumulativeUpdate {
                 $isSSU      = @($ssuPatterns | Where-Object { $desc -like "*$_*" })
                 ($matchesLCU.Count -gt 0) -and ($isSSU.Count -eq 0)
             } | Sort-Object InstalledOn -Descending)
+        $wmiCount = $lcuHistory.Count
+        if ($wmiCount -gt 0) { $dataSource = "Win32_QuickFixEngineering (WMI)" }
+    } else {
+        # Sample WMI count too even when Get-HotFix succeeded, so the
+        # bookkeeping-health signal can still flag the case where
+        # Get-HotFix works but WMI is empty (rare but seen in the wild).
+        try {
+            $wmiSample = @(Get-CimInstance -ClassName Win32_QuickFixEngineering -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $matchesLCU = @($lcuPatterns | Where-Object { $_.Description -like "*$_*" })
+                    $isSSU      = @($ssuPatterns | Where-Object { $_.Description -like "*$_*" })
+                    ($matchesLCU.Count -gt 0) -and ($isSSU.Count -eq 0)
+                })
+            $wmiCount = $wmiSample.Count
+        } catch { $wmiCount = -1 }
     }
 
     # Fallback 2: WUA COM update history - most reliable on Server 2016/2019 where
@@ -680,6 +713,7 @@ function Get-LastCumulativeUpdate {
 
                 if ($lcuHistory.Count -gt 0) {
                     Write-Log ("  WUA COM history found {0} LCU(s)" -f $lcuHistory.Count)
+                    $dataSource = "WUA COM (Microsoft.Update.Session)"
                     # Normalise property names - WUA uses .Title and .Date instead of .HotFixID / .InstalledOn
                     $lcuHistory = @($lcuHistory | ForEach-Object {
                         [PSCustomObject]@{
@@ -697,14 +731,23 @@ function Get-LastCumulativeUpdate {
     }
 
     $lcuResult = [ordered]@{
-        TotalLCUsFound    = $lcuHistory.Count
-        ThresholdDays     = $PatchStaleDays
-        ThresholdDate     = $cutoffDate.ToString("yyyy-MM-dd")
-        LastLCU_KB        = "None found"
-        LastLCU_Date      = "N/A"
-        LastLCU_DaysAgo   = "N/A"
-        WithinThreshold   = $false
-        SSUsExcluded      = $true
+        TotalLCUsFound      = $lcuHistory.Count
+        ThresholdDays       = $PatchStaleDays
+        ThresholdDate       = $cutoffDate.ToString("yyyy-MM-dd")
+        LastLCU_KB          = "None found"
+        LastLCU_Date        = "N/A"
+        LastLCU_DaysAgo     = "N/A"
+        WithinThreshold     = $false
+        SSUsExcluded        = $true
+        # V3 additions: bookkeeping health signal
+        DataSource          = $dataSource
+        HotFixCount         = $hotfixCount
+        WMICount            = $wmiCount
+        # Healthy = at least one of the legacy lookups (Get-HotFix or WMI) works.
+        # Degraded = only WUA COM has visibility into history. This is a strong
+        # signal that SoftwareDistribution\DataStore is corrupt or out of sync,
+        # and is a primary indicator that remediation is needed.
+        BookkeepingHealthy  = ($hotfixCount -gt 0 -or $wmiCount -gt 0)
     }
 
     if ($lcuHistory.Count -gt 0) {
@@ -728,6 +771,13 @@ function Get-LastCumulativeUpdate {
     } else {
         Write-Log "  No Cumulative Updates found in installed update history!" -Level "ERROR"
         Set-Status "FAIL"
+    }
+
+    # V3: bookkeeping-health post-check. Only meaningful when at least the COM
+    # API found history; if everything was empty the FAIL above already covered it.
+    if ($lcuHistory.Count -gt 0 -and -not $lcuResult.BookkeepingHealthy) {
+        Write-Log ("  WARN: Patch bookkeeping is DEGRADED. Get-HotFix={0}, WMI={1}, but WUA COM history has {2} LCU(s). Likely cause: SoftwareDistribution\DataStore corruption." -f $hotfixCount, $wmiCount, $lcuHistory.Count) -Level "WARN"
+        Set-Status "WARN"
     }
 
     $Script:Results["LCUCheck"] = $lcuResult
@@ -1529,19 +1579,37 @@ function Test-IsServer {
 
 function Test-IsWsusManaged {
     Write-Log "=== Pre-flight: detecting WSUS / PME management ==="
+    # V3: defensive read - the AU key sometimes exists with no UseWUServer value
+    # (e.g., partial GPO application or stale policy), which on V2 produced a
+    # confusing WARN. Now we detect that case explicitly and log INFO.
     $wsusKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
     try {
-        if (Test-Path $wsusKey) {
-            $val = (Get-ItemProperty -Path $wsusKey -Name UseWUServer -ErrorAction SilentlyContinue).UseWUServer
-            if ($val -eq 1) {
-                $Script:Environment.WsusManaged = $true
-                $serverKey = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -ErrorAction SilentlyContinue).WUServer
-                Write-Log "  WSUS-managed: UseWUServer=1, WUServer=$serverKey"
-                Write-Log "  Remediation will preserve all HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate keys."
-                return
-            }
+        $auKey = Get-Item -Path $wsusKey -ErrorAction SilentlyContinue
+        if (-not $auKey) {
+            Write-Log "  Not WSUS-managed (HKLM\...\WindowsUpdate\AU not present)."
+            return
         }
-        Write-Log "  Not WSUS-managed (UseWUServer not set or not 1)."
+
+        if ($auKey.Property -notcontains 'UseWUServer') {
+            Write-Log "  AU key present but UseWUServer value is not set; treating as NOT WSUS-managed."
+            Write-Log "  (This often indicates a partial GPO or a stale residual policy worth a manual gpresult /h check.)"
+            return
+        }
+
+        $val = (Get-ItemProperty -Path $wsusKey -Name UseWUServer -ErrorAction Stop).UseWUServer
+        if ($val -eq 1) {
+            $Script:Environment.WsusManaged = $true
+            $wuKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+            $wuItem = Get-Item -Path $wuKey -ErrorAction SilentlyContinue
+            $serverKey = if ($wuItem -and $wuItem.Property -contains 'WUServer') {
+                (Get-ItemProperty -Path $wuKey -Name WUServer -ErrorAction SilentlyContinue).WUServer
+            } else { "(not set)" }
+            Write-Log "  WSUS-managed: UseWUServer=1, WUServer=$serverKey"
+            Write-Log "  Remediation will preserve all HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate keys."
+            return
+        }
+
+        Write-Log "  Not WSUS-managed (UseWUServer=$val)."
     }
     catch {
         Write-Log "  WSUS detection error (assuming NOT WSUS-managed): $_" -Level "WARN"
@@ -1649,33 +1717,71 @@ function Backup-WindowsUpdateRegistry {
 }
 
 # ============================================================
-#  REMEDIATION FUNCTIONS
+#  REMEDIATION FUNCTIONS  (V3 - reliability/observability pass)
 # ============================================================
+
+# ----------------------------------------------------------------
+#  Helper: run a native command silently, redirect stdout to a temp
+#  file, return @{ ExitCode; Output; Duration } so callers can parse
+#  the output cleanly without leaking it into N-central's buffer.
+# ----------------------------------------------------------------
+function Invoke-CapturedCommand {
+    param(
+        [Parameter(Mandatory)] [string]$FilePath,
+        [Parameter(Mandatory)] [string[]]$ArgumentList,
+        [string]$OutputEncoding = "Default"   # "Default" | "Unicode"  (Unicode = UTF-16, used by sfc.exe)
+    )
+    $tmp = Join-Path $env:TEMP ("captured-{0}.tmp" -f ([Guid]::NewGuid().Guid.Substring(0,8)))
+    $start = Get-Date
+    try {
+        $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList `
+                           -NoNewWindow -Wait -PassThru `
+                           -RedirectStandardOutput $tmp `
+                           -ErrorAction Stop
+        $output = if (Test-Path $tmp) {
+            switch ($OutputEncoding) {
+                "Unicode" { [System.IO.File]::ReadAllText($tmp, [System.Text.Encoding]::Unicode) }
+                default   { Get-Content -LiteralPath $tmp -Raw -ErrorAction SilentlyContinue }
+            }
+        } else { "" }
+        return @{
+            ExitCode = $p.ExitCode
+            Output   = $output
+            Duration = ((Get-Date) - $start).TotalSeconds
+        }
+    }
+    catch {
+        return @{
+            ExitCode = -1
+            Output   = "$_"
+            Duration = ((Get-Date) - $start).TotalSeconds
+            Error    = "$_"
+        }
+    }
+    finally {
+        if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    }
+}
 
 function Invoke-DiskCleanupRemediation {
     Write-Log "=== Remediation: Disk cleanup ==="
 
-    # 1. Component store cleanup (frees up superseded WinSxS payloads)
+    # 1. DISM /StartComponentCleanup - long-running, redirect output
     Write-Log "  Running DISM /Online /Cleanup-Image /StartComponentCleanup ..."
-    try {
-        $args = @('/Online', '/Cleanup-Image', '/StartComponentCleanup', '/Quiet')
-        $p = Start-Process -FilePath "dism.exe" -ArgumentList $args -NoNewWindow -Wait -PassThru
-        if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) {
-            Add-Remediation -Step "DISM StartComponentCleanup" -Result "OK"
-        } else {
-            Add-Remediation -Step "DISM StartComponentCleanup" -Result "FAILED" -ErrorMessage "exit code $($p.ExitCode)"
-        }
-    }
-    catch {
-        Add-Remediation -Step "DISM StartComponentCleanup" -Result "FAILED" -ErrorMessage "$_"
+    $r = Invoke-CapturedCommand -FilePath "dism.exe" `
+            -ArgumentList @('/Online','/Cleanup-Image','/StartComponentCleanup','/Quiet')
+    if ($r.ExitCode -eq 0 -or $r.ExitCode -eq 3010) {
+        Add-Remediation -Step "DISM StartComponentCleanup" -Result "OK" -DurationSec $r.Duration
+    } else {
+        Add-Remediation -Step "DISM StartComponentCleanup" -Result "FAILED" -DurationSec $r.Duration -ErrorMessage "exit code $($r.ExitCode)"
     }
 
-    # 2. Prune %WINDIR%\Temp of files older than 7 days
+    # 2. Prune %WINDIR%\Temp
     Write-Log "  Pruning C:\Windows\Temp of files older than 7 days ..."
+    $start = Get-Date
     try {
         $cutoff  = (Get-Date).AddDays(-7)
-        $removed = 0
-        $bytes   = 0
+        $removed = 0; $bytes = 0
         Get-ChildItem -Path "C:\Windows\Temp" -File -Recurse -Force -ErrorAction SilentlyContinue |
             Where-Object { $_.LastWriteTime -lt $cutoff -and $_.FullName -notmatch 'PatchRemediate-' } |
             ForEach-Object {
@@ -1685,8 +1791,9 @@ function Invoke-DiskCleanupRemediation {
                     $removed++
                 } catch {}
             }
-        $mb = [math]::Round($bytes / 1MB, 2)
-        Add-Remediation -Step "Prune C:\Windows\Temp (>7 days)" -Result "OK" -Detail "removed $removed files, ${mb} MB"
+        $mb  = [math]::Round($bytes / 1MB, 2)
+        $dur = ((Get-Date) - $start).TotalSeconds
+        Add-Remediation -Step "Prune C:\Windows\Temp (>7 days)" -Result "OK" -DurationSec $dur -Detail "removed $removed files, ${mb} MB"
     }
     catch {
         Add-Remediation -Step "Prune C:\Windows\Temp (>7 days)" -Result "FAILED" -ErrorMessage "$_"
@@ -1695,61 +1802,53 @@ function Invoke-DiskCleanupRemediation {
 
 function Invoke-ServicesRemediation {
     Write-Log "=== Remediation: Windows Update services ==="
+    # V3 changes:
+    #   * Item 4: never downgrade Automatic to Manual. We respect whatever
+    #     StartType is currently set unless it's invalid/missing.
+    #   * Item 9: only force-start the services that *should* be running.
+    #     Demand-start services (bits, msiserver, appidsvc, dosvc) are
+    #     allowed to be Stopped - that's their normal state.
 
-    # Required services and their target start types.
-    # If a service is currently 'Disabled' we leave it alone - that's an admin choice.
-    $svcConfig = @(
-        @{ Name = 'wuauserv';        Start = 'Manual' },   # Manual is correct on modern Windows
-        @{ Name = 'bits';            Start = 'Manual' },
-        @{ Name = 'cryptsvc';        Start = 'Automatic' },
-        @{ Name = 'msiserver';       Start = 'Manual' },
-        @{ Name = 'TrustedInstaller';Start = 'Manual' },
-        @{ Name = 'appidsvc';        Start = 'Manual' }
-    )
+    # Required to be Running for WU to function:
+    $alwaysRunning = @('wuauserv', 'cryptsvc')
+    # Demand-start services we care about for WU but DON'T force-start:
+    $demandStart   = @('bits', 'msiserver', 'appidsvc', 'dosvc', 'TrustedInstaller')
 
-    foreach ($cfg in $svcConfig) {
-        $name  = $cfg.Name
-        try {
-            $svc = Get-Service -Name $name -ErrorAction Stop
-        }
-        catch {
+    foreach ($name in ($alwaysRunning + $demandStart)) {
+        $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+        if (-not $svc) {
             Add-Remediation -Step "Service '$name'" -Result "SKIPPED" -Detail "service not present on this OS"
             continue
         }
 
+        $startType = "Unknown"
         try {
             $startType = (Get-CimInstance -ClassName Win32_Service -Filter "Name='$name'" -ErrorAction Stop).StartMode
-        } catch { $startType = "Unknown" }
+        } catch {}
 
-        # Don't override an admin's deliberate Disabled choice
         if ($startType -eq 'Disabled') {
             Add-Remediation -Step "Service '$name'" -Result "SKIPPED" -Detail "currently Disabled - admin intent preserved"
             continue
         }
 
-        # Set start type if it differs from target (Auto can be Auto or Auto (Delayed Start), accept either)
-        $targetStart = $cfg.Start
-        $needsSet    = $false
-        if ($targetStart -eq 'Manual'    -and $startType -ne 'Manual')    { $needsSet = $true }
-        if ($targetStart -eq 'Automatic' -and $startType -notmatch 'Auto') { $needsSet = $true }
+        # V3: do NOT modify StartMode. Auto/Manual/Auto Delayed Start are all
+        # acceptable - operator chose this config and we respect it.
 
-        if ($needsSet) {
-            try {
-                Set-Service -Name $name -StartupType $targetStart -ErrorAction Stop
-                Add-Remediation -Step "Service '$name' StartupType -> $targetStart" -Result "OK" -Detail "was $startType"
-            } catch {
-                Add-Remediation -Step "Service '$name' StartupType -> $targetStart" -Result "FAILED" -ErrorMessage "$_"
+        if ($name -in $alwaysRunning) {
+            if ($svc.Status -ne 'Running') {
+                try {
+                    Start-Service -Name $name -ErrorAction Stop
+                    Add-Remediation -Step "Service '$name' Start" -Result "OK" -Detail "was $($svc.Status), StartType=$startType"
+                } catch {
+                    Add-Remediation -Step "Service '$name' Start" -Result "FAILED" -ErrorMessage "$_"
+                }
+            } else {
+                Add-Remediation -Step "Service '$name'" -Result "INFO" -Detail "Running ($startType) - OK"
             }
-        }
-
-        # Start if stopped (BITS is allowed to be stopped; only flag wuauserv/cryptsvc)
-        if ($svc.Status -ne 'Running') {
-            try {
-                Start-Service -Name $name -ErrorAction Stop
-                Add-Remediation -Step "Service '$name' Start" -Result "OK" -Detail "was $($svc.Status)"
-            } catch {
-                Add-Remediation -Step "Service '$name' Start" -Result "FAILED" -ErrorMessage "$_"
-            }
+        } else {
+            # Demand-start: just observe. Don't try to start it - it'll start
+            # when needed and will self-stop after.
+            Add-Remediation -Step "Service '$name'" -Result "INFO" -Detail "$($svc.Status) ($startType) - demand-start, no action"
         }
     }
 }
@@ -1778,8 +1877,8 @@ function Invoke-WUComponentReset {
 
     # ---- Step 2: rename SoftwareDistribution and catroot2 ----
     $renameTargets = @(
-        @{ Path = "$env:SystemRoot\SoftwareDistribution";              NewName = "SoftwareDistribution.bak-$stamp" },
-        @{ Path = "$env:SystemRoot\System32\catroot2";                 NewName = "catroot2.bak-$stamp" }
+        @{ Path = "$env:SystemRoot\SoftwareDistribution"; NewName = "SoftwareDistribution.bak-$stamp" },
+        @{ Path = "$env:SystemRoot\System32\catroot2";    NewName = "catroot2.bak-$stamp" }
     )
     foreach ($t in $renameTargets) {
         try {
@@ -1811,7 +1910,7 @@ function Invoke-WUComponentReset {
         Add-Remediation -Step "Clear BITS qmgr*.dat" -Result "FAILED" -ErrorMessage "$_"
     }
 
-    # ---- Step 4: re-register WU/COM DLLs ----
+    # ---- Step 4: re-register WU/COM DLLs (V3: per-DLL logging on failure) ----
     $dlls = @(
         'atl.dll','urlmon.dll','mshtml.dll','shdocvw.dll','browseui.dll',
         'jscript.dll','vbscript.dll','scrrun.dll','msxml.dll','msxml3.dll','msxml6.dll',
@@ -1822,19 +1921,34 @@ function Invoke-WUComponentReset {
         'qmgr.dll','qmgrprxy.dll','wucltux.dll','muweb.dll','wuwebv.dll'
     )
     $sys32 = "$env:SystemRoot\System32"
-    $okCount = 0; $missCount = 0; $failCount = 0
+    $okList   = New-Object System.Collections.Generic.List[string]
+    $missList = New-Object System.Collections.Generic.List[string]
+    $failList = New-Object System.Collections.Generic.List[string]
+    $start = Get-Date
     foreach ($dll in $dlls) {
         $full = Join-Path $sys32 $dll
-        if (-not (Test-Path $full)) { $missCount++; continue }
+        if (-not (Test-Path $full)) { $missList.Add($dll); continue }
         try {
             $p = Start-Process -FilePath "regsvr32.exe" -ArgumentList @('/s', $full) -NoNewWindow -Wait -PassThru -ErrorAction Stop
-            if ($p.ExitCode -eq 0) { $okCount++ } else { $failCount++ }
-        } catch { $failCount++ }
+            if ($p.ExitCode -eq 0) { $okList.Add($dll) } else {
+                $failList.Add(("{0} (exit {1})" -f $dll, $p.ExitCode))
+                # V3: per-DLL FAILED line so the exact failure shows up in the report
+                Add-Remediation -Step "regsvr32 /s $dll" -Result "FAILED" -ErrorMessage "exit $($p.ExitCode)"
+            }
+        } catch {
+            $failList.Add(("{0} (exception)" -f $dll))
+            Add-Remediation -Step "regsvr32 /s $dll" -Result "FAILED" -ErrorMessage "$_"
+        }
     }
-    if ($failCount -eq 0) {
-        Add-Remediation -Step "Re-register WU/COM DLLs (regsvr32 /s)" -Result "OK" -Detail "$okCount registered, $missCount not present on this OS"
+    $dur = ((Get-Date) - $start).TotalSeconds
+
+    # Aggregate summary line (the per-DLL FAIL lines above provide detail)
+    $summary = "{0} ok / {1} failed / {2} not-present" -f $okList.Count, $failList.Count, $missList.Count
+    if ($failList.Count -eq 0) {
+        Add-Remediation -Step "Re-register WU/COM DLLs (regsvr32 /s)" -Result "OK" -DurationSec $dur -Detail $summary
     } else {
-        Add-Remediation -Step "Re-register WU/COM DLLs (regsvr32 /s)" -Result "FAILED" -Detail "$okCount ok / $failCount failed / $missCount missing"
+        Add-Remediation -Step "Re-register WU/COM DLLs (regsvr32 /s)" -Result "FAILED" -DurationSec $dur `
+            -Detail "$summary; failed: $($failList -join ', ')"
     }
 
     # ---- Step 5: reset WinHTTP proxy (skip if a proxy is configured) ----
@@ -1877,8 +1991,6 @@ function Invoke-WUComponentReset {
 
 function Invoke-PendingRebootRemediation {
     Write-Log "=== Remediation: Pending reboot artefacts ==="
-    # We do NOT clear pending-reboot keys (CBS/WU/SCCM/PFR). Lying to the OS breaks future patch installs.
-    # The one exception: a long-stale pending.xml (>$PendingXmlAgeDays old) is a known-corrupt state.
     $pending = Join-Path $env:SystemRoot "WinSxS\pending.xml"
     if (-not (Test-Path $pending)) {
         Add-Remediation -Step "pending.xml check" -Result "INFO" -Detail "not present"
@@ -1907,18 +2019,15 @@ function Invoke-TimeSyncRemediation {
         return
     }
     try {
-        # Make sure w32time is running
         $svc = Get-Service -Name w32time -ErrorAction SilentlyContinue
-        if ($svc) {
-            if ($svc.Status -ne 'Running') {
-                Start-Service -Name w32time -ErrorAction Stop
-                Add-Remediation -Step "Start w32time" -Result "OK"
-            }
+        if ($svc -and $svc.Status -ne 'Running') {
+            Start-Service -Name w32time -ErrorAction Stop
+            Add-Remediation -Step "Start w32time" -Result "OK"
         }
         $r = & w32tm /resync /force 2>&1
         $exit = $LASTEXITCODE
         if ($exit -eq 0) {
-            Add-Remediation -Step "w32tm /resync /force" -Result "OK" -Detail (($r | Out-String).Trim())
+            Add-Remediation -Step "w32tm /resync /force" -Result "OK" -Detail (($r | Out-String).Trim() -replace "`r?`n", " | ")
         } else {
             Add-Remediation -Step "w32tm /resync /force" -Result "FAILED" -ErrorMessage (($r | Out-String).Trim())
         }
@@ -1929,85 +2038,112 @@ function Invoke-TimeSyncRemediation {
 
 function Invoke-ComponentStoreRepair {
     Write-Log "=== Remediation: Component store repair (DISM + SFC) ==="
+    # V3 changes:
+    #   * Item 2: ALL native command output (DISM, SFC) is captured to a
+    #     temp file and parsed; nothing leaks into N-central's output buffer.
+    #   * Item 3: SFC /scannow is now CONDITIONAL on DISM finding damage.
+    #     Pass -ForceSfc to override.
 
-    # CheckHealth - very fast, reads CBS state
-    try {
-        $p = Start-Process -FilePath "dism.exe" -ArgumentList @('/Online','/Cleanup-Image','/CheckHealth') -NoNewWindow -Wait -PassThru
-        Add-Remediation -Step "DISM /CheckHealth" -Result $(if ($p.ExitCode -eq 0) {"OK"} else {"FAILED"}) -Detail "exit $($p.ExitCode)"
-    } catch { Add-Remediation -Step "DISM /CheckHealth" -Result "FAILED" -ErrorMessage "$_" }
+    $needRestore = $false
 
-    # ScanHealth - actively scans component store, can take 5-10 minutes
-    $needRestore = $true
-    try {
-        Write-Log "  Running DISM /ScanHealth (may take several minutes)..."
-        $tmpOut = Join-Path $env:TEMP "dism-scan-$(Get-Random).log"
-        $p = Start-Process -FilePath "dism.exe" -ArgumentList @('/Online','/Cleanup-Image','/ScanHealth') -NoNewWindow -Wait -PassThru -RedirectStandardOutput $tmpOut
-        $scanText = if (Test-Path $tmpOut) { Get-Content $tmpOut -Raw } else { "" }
-        Remove-Item $tmpOut -Force -ErrorAction SilentlyContinue
-        if ($p.ExitCode -eq 0) {
-            if ($scanText -match 'No component store corruption detected') {
-                $needRestore = $false
-                Add-Remediation -Step "DISM /ScanHealth" -Result "OK" -Detail "no corruption detected; skipping RestoreHealth"
-            } else {
-                Add-Remediation -Step "DISM /ScanHealth" -Result "OK" -Detail "damage detected; will run RestoreHealth"
-            }
+    # ---- DISM /CheckHealth (fast) ----
+    $r = Invoke-CapturedCommand -FilePath "dism.exe" `
+            -ArgumentList @('/Online','/Cleanup-Image','/CheckHealth')
+    if ($r.ExitCode -eq 0) {
+        if ($r.Output -match 'No component store corruption detected') {
+            Add-Remediation -Step "DISM /CheckHealth" -Result "OK" -DurationSec $r.Duration -Detail "no corruption"
         } else {
-            Add-Remediation -Step "DISM /ScanHealth" -Result "FAILED" -ErrorMessage "exit $($p.ExitCode)"
+            $needRestore = $true
+            Add-Remediation -Step "DISM /CheckHealth" -Result "OK" -DurationSec $r.Duration -Detail "potential damage flagged - will run ScanHealth"
         }
-    } catch { Add-Remediation -Step "DISM /ScanHealth" -Result "FAILED" -ErrorMessage "$_" }
+    } else {
+        Add-Remediation -Step "DISM /CheckHealth" -Result "FAILED" -DurationSec $r.Duration -ErrorMessage "exit $($r.ExitCode)"
+    }
 
-    # RestoreHealth - only if scan found damage. Can take 15-30 min.
+    # ---- DISM /ScanHealth (5-10 min) ----
+    Write-Log "  Running DISM /ScanHealth (may take several minutes)..."
+    $r = Invoke-CapturedCommand -FilePath "dism.exe" `
+            -ArgumentList @('/Online','/Cleanup-Image','/ScanHealth')
+    if ($r.ExitCode -eq 0) {
+        if ($r.Output -match 'No component store corruption detected') {
+            $needRestore = $false
+            Add-Remediation -Step "DISM /ScanHealth" -Result "OK" -DurationSec $r.Duration -Detail "no corruption detected"
+        } else {
+            $needRestore = $true
+            Add-Remediation -Step "DISM /ScanHealth" -Result "OK" -DurationSec $r.Duration -Detail "damage detected - will run RestoreHealth"
+        }
+    } else {
+        Add-Remediation -Step "DISM /ScanHealth" -Result "FAILED" -DurationSec $r.Duration -ErrorMessage "exit $($r.ExitCode)"
+    }
+
+    # ---- DISM /RestoreHealth (only if scan found damage; 15-30 min) ----
     if ($needRestore) {
-        try {
-            Write-Log "  Running DISM /RestoreHealth (this can take 15-30 minutes)..."
-            $p = Start-Process -FilePath "dism.exe" -ArgumentList @('/Online','/Cleanup-Image','/RestoreHealth') -NoNewWindow -Wait -PassThru
-            Add-Remediation -Step "DISM /RestoreHealth" -Result $(if ($p.ExitCode -eq 0) {"OK"} else {"FAILED"}) -Detail "exit $($p.ExitCode)"
-        } catch { Add-Remediation -Step "DISM /RestoreHealth" -Result "FAILED" -ErrorMessage "$_" }
+        Write-Log "  Running DISM /RestoreHealth (this can take 15-30 minutes)..."
+        $r = Invoke-CapturedCommand -FilePath "dism.exe" `
+                -ArgumentList @('/Online','/Cleanup-Image','/RestoreHealth')
+        if ($r.ExitCode -eq 0) {
+            Add-Remediation -Step "DISM /RestoreHealth" -Result "OK" -DurationSec $r.Duration
+        } else {
+            Add-Remediation -Step "DISM /RestoreHealth" -Result "FAILED" -DurationSec $r.Duration -ErrorMessage "exit $($r.ExitCode)"
+        }
     } else {
         Add-Remediation -Step "DISM /RestoreHealth" -Result "SKIPPED" -Detail "no damage detected"
     }
 
-    # SFC /scannow - 5-15 min
-    try {
-        Write-Log "  Running sfc /scannow (this can take 5-15 minutes)..."
-        $p = Start-Process -FilePath "$env:SystemRoot\System32\sfc.exe" -ArgumentList @('/scannow') -NoNewWindow -Wait -PassThru
-        # SFC exit codes are not standardized; 0 = no integrity violations, others may be informational.
-        Add-Remediation -Step "sfc /scannow" -Result $(if ($p.ExitCode -eq 0) {"OK"} else {"INFO"}) -Detail "exit $($p.ExitCode)"
-    } catch { Add-Remediation -Step "sfc /scannow" -Result "FAILED" -ErrorMessage "$_" }
+    # ---- SFC /scannow (V3: only when DISM found damage, or -ForceSfc was passed) ----
+    $runSfc = $needRestore -or $ForceSfc
+    if (-not $runSfc) {
+        Add-Remediation -Step "sfc /scannow" -Result "SKIPPED" `
+            -Detail "DISM ScanHealth reported no damage (use -ForceSfc to run anyway)"
+    } else {
+        $reason = if ($ForceSfc -and -not $needRestore) { "-ForceSfc supplied" } else { "DISM detected damage" }
+        Write-Log "  Running sfc /scannow ($reason; this can take 5-15 minutes)..."
+        # sfc.exe writes UTF-16 to stdout; capture with the right encoding.
+        $r = Invoke-CapturedCommand -FilePath "$env:SystemRoot\System32\sfc.exe" `
+                -ArgumentList @('/scannow') -OutputEncoding "Unicode"
+        # Parse the well-known summary line from SFC
+        $detail = "exit $($r.ExitCode)"
+        if ($r.Output -match 'did not find any integrity violations')         { $detail = "no integrity violations found" }
+        elseif ($r.Output -match 'successfully repaired')                       { $detail = "found and repaired corrupt files" }
+        elseif ($r.Output -match 'found corrupt files but was unable to fix')   { $detail = "found corrupt files - some unreparable; review CBS.log" }
+        elseif ($r.Output -match 'could not perform the requested operation')   { $detail = "could not perform operation; check CBS.log" }
+        $result = if ($r.ExitCode -eq 0) { "OK" } else { "INFO" }
+        Add-Remediation -Step "sfc /scannow" -Result $result -DurationSec $r.Duration -Detail $detail
+    }
 }
 
 function Invoke-WUDetection {
     Write-Log "=== Remediation: Force fresh Windows Update detection ==="
 
-    # Prefer PSWindowsUpdate when present
     if ($Script:Environment.HasPSWindowsUpdate) {
         try {
             Import-Module PSWindowsUpdate -ErrorAction Stop
-            # Get-WUList triggers WUA to refresh the list of applicable updates.
             Write-Log "  Querying available updates via Get-WUList ..."
+            $start = Get-Date
             $list = Get-WUList -MicrosoftUpdate -ErrorAction Stop
             $count = if ($list) { @($list).Count } else { 0 }
-            Add-Remediation -Step "Force WU scan (PSWindowsUpdate Get-WUList)" -Result "OK" -Detail "$count update(s) currently applicable"
+            $dur = ((Get-Date) - $start).TotalSeconds
+            Add-Remediation -Step "Force WU scan (PSWindowsUpdate Get-WUList)" -Result "OK" -DurationSec $dur -Detail "$count update(s) currently applicable"
             return
         } catch {
             Add-Remediation -Step "Force WU scan (PSWindowsUpdate Get-WUList)" -Result "FAILED" -ErrorMessage "$_"
-            # fall through to native methods
         }
     }
 
-    # UsoClient (Windows 10+ / Server 2016+)
     $uso = Join-Path $env:SystemRoot "System32\UsoClient.exe"
     if (Test-Path $uso) {
         try {
+            $start = Get-Date
             $p = Start-Process -FilePath $uso -ArgumentList "StartScan" -NoNewWindow -Wait -PassThru
-            Add-Remediation -Step "Force WU scan (UsoClient StartScan)" -Result $(if ($p.ExitCode -eq 0) {"OK"} else {"INFO"}) -Detail "exit $($p.ExitCode) (scan runs in background)"
+            $dur = ((Get-Date) - $start).TotalSeconds
+            Add-Remediation -Step "Force WU scan (UsoClient StartScan)" -Result $(if ($p.ExitCode -eq 0) {"OK"} else {"INFO"}) `
+                -DurationSec $dur -Detail "exit $($p.ExitCode) (scan runs in background)"
             return
         } catch {
             Add-Remediation -Step "Force WU scan (UsoClient StartScan)" -Result "FAILED" -ErrorMessage "$_"
         }
     }
 
-    # Fallback: legacy wuauclt /detectnow
     $wuauclt = Join-Path $env:SystemRoot "System32\wuauclt.exe"
     if (Test-Path $wuauclt) {
         try {
@@ -2226,6 +2362,17 @@ function Write-ComplianceReport {
         Row "Within Threshold"     $(if ($lcu["WithinThreshold"]) {"PASS"} else {"FAIL"}) $lcuFlag
         Row "Total LCUs Found"     $lcu["TotalLCUsFound"]
         Row "SSUs Excluded"        "Yes"
+        # V3: bookkeeping signal - flags partly-broken patch history (Get-HotFix
+        # / WMI empty even though COM history has entries)
+        if ($lcu.Contains("DataSource")) {
+            Row "Last LCU Source"      $lcu["DataSource"]
+            $bkFlag = if (-not $lcu["BookkeepingHealthy"]) { "DEGRADED - SoftwareDistribution rebuild recommended" } else { "" }
+            Row "Patch Bookkeeping"    $(if ($lcu["BookkeepingHealthy"]) {"HEALTHY"} else {"DEGRADED"}) $bkFlag
+            if (-not $lcu["BookkeepingHealthy"]) {
+                Row "  Get-HotFix count"   $lcu["HotFixCount"]
+                Row "  WMI count"          $lcu["WMICount"]
+            }
+        }
     } else {
         Write-Output "  [LCU check not performed]"
     }
@@ -2370,12 +2517,16 @@ function Write-ComplianceReport {
     if ($Script:Remediations.Count -eq 0) {
         Write-Output "  (none recorded)"
     } else {
-        Write-Output ("  {0,-8} {1,-9} {2,-50} {3}" -f "Time","Result","Step","Detail/Error")
-        Write-Output ("  " + ("-" * 92))
+        Write-Output ("  {0,-8} {1,-9} {2,-9} {3,-46} {4}" -f "Time","Result","Duration","Step","Detail/Error")
+        Write-Output ("  " + ("-" * 100))
         foreach ($r in $Script:Remediations) {
             $note = if ($r.Error) { "ERR: $($r.Error)" } else { $r.Detail }
-            $stepStr = if ($r.Step.Length -gt 50) { $r.Step.Substring(0,49) + "…" } else { $r.Step }
-            Write-Output ("  {0,-8} {1,-9} {2,-50} {3}" -f $r.Time, $r.Result, $stepStr, $note)
+            $stepStr = if ($r.Step.Length -gt 46) { $r.Step.Substring(0,45) + "…" } else { $r.Step }
+            $durStr = if ($r.Duration -and $r.Duration -gt 0) {
+                if ($r.Duration -ge 60) { "{0:N0}m{1:N0}s" -f [math]::Floor($r.Duration/60), ($r.Duration%60) }
+                else                     { "{0:N0}s" -f $r.Duration }
+            } else { "-" }
+            Write-Output ("  {0,-8} {1,-9} {2,-9} {3,-46} {4}" -f $r.Time, $r.Result, $durStr, $stepStr, $note)
         }
         $okCt   = ($Script:Remediations | Where-Object { $_.Result -eq 'OK' }).Count
         $failCt = ($Script:Remediations | Where-Object { $_.Result -eq 'FAILED' }).Count
@@ -2427,7 +2578,7 @@ function Write-ComplianceReport {
     # ---- Footer ----
     Write-Output ""
     Write-Output $divider
-    Write-Output "  Script  : Remediate-PatchComplianceV2.ps1"
+    Write-Output "  Script  : Remediate-PatchCompliance.ps1"
     Write-Output "  Phase 1/2 Status : $FinalStatus"
     Write-Output "  Phase 3 Outcome  : $RemediationOutcome"
     Write-Output "  Completed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
@@ -2439,7 +2590,7 @@ function Write-ComplianceReport {
 #  MAIN EXECUTION
 # ============================================================
 Write-Log "############################################################"
-Write-Log " Remediate-PatchCompliance - Starting  [v2]"
+Write-Log " Remediate-PatchCompliance - Starting  [v3]"
 Write-Log " Combined Check + Aggressive Remediation"
 Write-Log "############################################################"
 
@@ -2448,9 +2599,21 @@ Write-Log "############################################################"
 # confusing output) on Win 7 / Server 2008 / Server 2008 R2.
 Test-SupportedOS
 
+# V3 Item 10: mirror everything to a transcript file so the full report
+# survives N-central output truncation. The transcript captures both the
+# log lines and the final report.
+$transcriptPath = "C:\Windows\Temp\Remediate-PatchCompliance-$env:COMPUTERNAME-$(Get-Date -Format yyyyMMdd-HHmmss).log"
+try {
+    Start-Transcript -Path $transcriptPath -Force -ErrorAction Stop | Out-Null
+    $Script:Environment.TranscriptPath = $transcriptPath
+    Write-Log "  Transcript started: $transcriptPath"
+} catch {
+    Write-Log "  Could not start transcript: $_" -Level "WARN"
+}
+
 try {
     # -----------------------------------------------------------------
-    # PHASE 1 - CHECK (V13 functions, verbatim)
+    # PHASE 1 - CHECK
     # -----------------------------------------------------------------
     Write-Log "===== PHASE 1: CHECK ====="
     $sysInfo      = Get-SystemInfo
@@ -2463,16 +2626,13 @@ try {
     $timeSyncInfo = Test-TimeSync -WarnOffsetSeconds $TimeSyncWarnSec -FailOffsetSeconds $TimeSyncFailSec
     $tpmInfo      = Test-TPMVersion
 
-    # Snapshot Phase-1 results so the report can render before/after.
     foreach ($k in $Script:Results.Keys) {
         $v = $Script:Results[$k]
         if ($v -is [System.Collections.IDictionary] -or $v -is [hashtable] -or $v -is [System.Collections.Specialized.OrderedDictionary]) {
-            # Shallow clone of hashtable-like results
             $clone = [ordered]@{}
             foreach ($kk in $v.Keys) { $clone[$kk] = $v[$kk] }
             $Script:PreCheckSnapshot[$k] = $clone
         } else {
-            # PSCustomObject (e.g. SystemInfo) - reference is fine, we don't mutate it
             $Script:PreCheckSnapshot[$k] = $v
         }
     }
@@ -2484,15 +2644,11 @@ try {
     Write-Log "===== PHASE 2: REMEDIATE ====="
     $Script:Environment.RemediationStartTime = Get-Date
 
-    # Pre-flight
     Test-IsServer
     Test-IsWsusManaged
     Install-PSWindowsUpdateIfMissing
     Backup-WindowsUpdateRegistry
 
-    # If the system is EOL with no valid ESU, remediation isn't going to make
-    # patches install. We still run the WU stack repair (so the box's WU is
-    # healthy for any future re-image / ESU activation) but skip the WU scan.
     $eolAndUnsupported = ($Script:Results["EOL"] -and $Script:Results["EOL"]["IsEOL"])
 
     Invoke-DiskCleanupRemediation
@@ -2529,15 +2685,19 @@ catch {
     Set-Status "FAIL"
 }
 
-# -----------------------------------------------------------------
-# Final status & report
-# -----------------------------------------------------------------
 Write-Log "############################################################"
 Write-Log " Final  Status      : $Script:OverallStatus"
 Write-Log " Remediation Outcome: $Script:RemediationOutcome"
 Write-Log "############################################################"
 
 Write-ComplianceReport -AllResults $Script:Results -FinalStatus $Script:OverallStatus -RemediationOutcome $Script:RemediationOutcome
+
+# V3 Item 10: stop transcript so the report file is flushed and closed
+try {
+    Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
+    Write-Host ""
+    Write-Host "Full transcript saved to: $($Script:Environment.TranscriptPath)"
+} catch {}
 
 # Exit code:
 #   0 = PASS  or  REMEDIATED
@@ -2549,8 +2709,6 @@ switch ($Script:OverallStatus) {
     "WARN" { $exit = 1 }
     "FAIL" { $exit = 2 }
 }
-# Promote PASS->0 to REMEDIATED->0 (already 0); demote WARN->1 to PARTIAL->1 (already 1);
-# but if remediation ran and explicitly says REMEDIATED, treat as success regardless.
 if ($Script:RemediationOutcome -eq "REMEDIATED") { $exit = 0 }
 if ($Script:RemediationOutcome -eq "PARTIAL")    { $exit = 1 }
 if ($Script:RemediationOutcome -eq "FAIL")       { $exit = 2 }
