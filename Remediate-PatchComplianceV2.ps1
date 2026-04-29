@@ -70,8 +70,9 @@
         1 = WARN or PARTIAL
         2 = FAIL or UNSUPPORTED OS
 
-    Author : commander
-    Repo   : https://github.com/blanketmothership/hosts
+    Author  : commander
+    Repo    : https://github.com/blanketmothership/hosts
+    Version : v2  (adds OS gate; refuses to run on Win 7 / Server 2008 / 2008 R2)
 #>
 
 # ============================================================
@@ -2426,7 +2427,7 @@ function Write-ComplianceReport {
     # ---- Footer ----
     Write-Output ""
     Write-Output $divider
-    Write-Output "  Script  : Remediate-PatchCompliance.ps1"
+    Write-Output "  Script  : Remediate-PatchComplianceV2.ps1"
     Write-Output "  Phase 1/2 Status : $FinalStatus"
     Write-Output "  Phase 3 Outcome  : $RemediationOutcome"
     Write-Output "  Completed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
@@ -2438,7 +2439,7 @@ function Write-ComplianceReport {
 #  MAIN EXECUTION
 # ============================================================
 Write-Log "############################################################"
-Write-Log " Remediate-PatchCompliance - Starting"
+Write-Log " Remediate-PatchCompliance - Starting  [v2]"
 Write-Log " Combined Check + Aggressive Remediation"
 Write-Log "############################################################"
 
