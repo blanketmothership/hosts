@@ -73,7 +73,12 @@
 
     Author  : commander
     Repo    : https://github.com/blanketmothership/hosts
-    Version : v4.1 (hotfix - wrap pipeline result in @() before .Count
+    Version : v4.2 (cosmetic - report headline now leads with the
+                   post-remediation outcome (REMEDIATED / PARTIAL / FAIL)
+                   instead of the pre-remediation Phase-1/2 status, so
+                   N-central email subject lines stop flagging healthy
+                   boxes as FAIL)
+              v4.1 (hotfix - wrap pipeline result in @() before .Count
                    so the report tally works under StrictMode when the
                    filter returns a scalar or null)
               v4   (gating layer; deprecated-DLL handling; reg.exe
@@ -2472,12 +2477,20 @@ function Write-ComplianceReport {
         return $s.Substring(0, $max - 1) + "."
     }
 
-    $effectiveStatus = if ($RemediationOutcome -in @("REMEDIATED","PARTIAL","FAIL")) {
-        "$FinalStatus  ($RemediationOutcome after remediation)"
-    } else { $FinalStatus }
+    # V4.2: lead with the post-remediation outcome so the report header,
+    # the N-central exit-code interpretation, and the operator-facing email
+    # subject all agree. The pre-remediation status is preserved in
+    # parentheses for audit ("was FAIL pre-remediation").
+    $headline = switch ($RemediationOutcome) {
+        "REMEDIATED" { "REMEDIATED  (was $FinalStatus pre-remediation)" }
+        "PARTIAL"    { "PARTIAL  (was $FinalStatus pre-remediation; some items still failing)" }
+        "FAIL"       { "FAIL  (remediation did not resolve all issues)" }
+        "NONE"       { $FinalStatus }   # nothing was failing in Phase 1; show PASS / WARN as-is
+        default      { $FinalStatus }
+    }
     Write-Output $divider
     Write-Output "  WINDOWS PATCH COMPLIANCE + REMEDIATION REPORT"
-    Write-Output "  Overall Status : $effectiveStatus"
+    Write-Output "  Overall Status : $headline"
     Write-Output "  Host           : $hostname"
     Write-Output "  Report Time    : $timestamp"
     Write-Output $divider
@@ -2778,7 +2791,7 @@ function Write-ComplianceReport {
     # ---- Footer ----
     Write-Output ""
     Write-Output $divider
-    Write-Output "  Script  : Remediate-PatchComplianceV4.1.ps1"
+    Write-Output "  Script  : Remediate-PatchComplianceV4.2.ps1"
     Write-Output "  Phase 1/2 Status : $FinalStatus"
     Write-Output "  Phase 3 Outcome  : $RemediationOutcome"
     Write-Output "  Completed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
@@ -2790,7 +2803,7 @@ function Write-ComplianceReport {
 #  MAIN EXECUTION
 # ============================================================
 Write-Log "############################################################"
-Write-Log " Remediate-PatchCompliance - Starting  [v4.1]"
+Write-Log " Remediate-PatchCompliance - Starting  [v4.2]"
 Write-Log " Combined Check + Gated Remediation"
 Write-Log "############################################################"
 
