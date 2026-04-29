@@ -1,9 +1,25 @@
 #Requires -RunAsAdministrator
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Windows Patch Compliance Check & Remediation Script
     Combined check + aggressive remediation. Designed for N-central
     "Run a Script" deployment.
+
+    Supported operating systems (build number >= 9200):
+        Windows 8.1                  (build 9600)
+        Windows 10  (all branches)   (build 10240+)
+        Windows 11  (all branches)   (build 22000+)
+        Windows Server 2012          (build 9200)
+        Windows Server 2012 R2       (build 9600)
+        Windows Server 2016          (build 14393)
+        Windows Server 2019          (build 17763)
+        Windows Server 2022          (build 20348)
+        Windows Server 2025          (build 26100)
+
+    Explicitly NOT supported:
+        Windows 7 / Server 2008 / Server 2008 R2 (and earlier).
+        The script will refuse to run with exit code 2 on these.
 
 .DESCRIPTION
     PHASE 1 - CHECK (inherited verbatim from Invoke-PatchComplianceCheckV13)
@@ -34,40 +50,25 @@
 
         WSUS / N-central PME safe:
             Never modifies HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate.
-            All AU/WSUS GPO settings (UseWUServer, WUServer, WUStatusServer,
-            AUOptions, etc.) are preserved.
 
         Never reboots. If a remediation step requires reboot to take effect,
         the report flags it as REBOOT REQUIRED. Operator/N-central handles it.
 
     PHASE 3 - RE-CHECK
         Re-runs the Test-* functions that originally returned WARN or FAIL
-        and produces a before/after comparison. The OverallStatus reflects
-        the post-remediation state.
+        and produces a before/after comparison.
 
     REPORT
         Same V13-style plain-text report, plus:
-          * REMEDIATIONS APPLIED section (per step: status, error, note)
-          * BEFORE / AFTER comparison for re-checked items
+          * REMEDIATIONS APPLIED section
+          * BEFORE / AFTER comparison
           * Footer reflects PASS / REMEDIATED / PARTIAL / FAIL
 
 .NOTES
-    N-central Usage:
-      1. Upload to N-central > Configuration > Scripting/Software Repository.
-      2. Schedule or run on demand via "Run a Script". No parameters required.
-      3. Enable "Send task output file in email" on the task's Notifications
-         tab so the report reaches the on-call engineer.
-
-    Requirements:
-      - PowerShell 5.1+
-      - Must run as SYSTEM or local Administrator
-      - Internet access to PSGallery for PSWindowsUpdate install (optional;
-        falls back to WUA COM if install fails)
-
     Exit codes (for N-central):
-        0 = PASS or REMEDIATED (all post-remediation checks pass)
-        1 = WARN or PARTIAL    (some issues remain after remediation)
-        2 = FAIL               (critical failure or remediation blocked)
+        0 = PASS or REMEDIATED
+        1 = WARN or PARTIAL
+        2 = FAIL or UNSUPPORTED OS
 
     Author : commander
     Repo   : https://github.com/blanketmothership/hosts
@@ -167,6 +168,54 @@ function Add-Remediation {
     $msg   = "[REMEDIATION] $Step -> $Result" + $(if ($Detail) {"  ($Detail)"} else {""}) + $(if ($ErrorMessage) {"  ERR: $ErrorMessage"} else {""})
     Write-Log $msg -Level $level
 }
+
+# ============================================================
+#  HELPER: Test-SupportedOS
+#  Hard gate that refuses to run on Windows 7 / Server 2008 / 2008 R2
+#  (and anything older). The minimum supported build is 9200
+#  (Windows Server 2012 / Windows 8). Below that we emit a minimal
+#  report and exit with code 2 (FAIL) so N-central flags the task.
+# ============================================================
+function Test-SupportedOS {
+    Write-Log "=== OS gate: verifying supported Windows version ==="
+    $minBuild = 9200   # Windows Server 2012 / Windows 8
+
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    } catch {
+        Write-Host ""
+        Write-Host "================================================================="
+        Write-Host "  REMEDIATE-PATCHCOMPLIANCE - UNSUPPORTED ENVIRONMENT"
+        Write-Host "  Could not query Win32_OperatingSystem: $_"
+        Write-Host "  Refusing to run."
+        Write-Host "================================================================="
+        exit 2
+    }
+
+    $build = 0
+    [void][int]::TryParse([string]$os.BuildNumber, [ref]$build)
+    $caption = $os.Caption
+
+    if ($build -lt $minBuild) {
+        Write-Host ""
+        Write-Host "================================================================="
+        Write-Host "  REMEDIATE-PATCHCOMPLIANCE - UNSUPPORTED OPERATING SYSTEM"
+        Write-Host "  Detected : $caption  (build $build)"
+        Write-Host "  Required : Windows Server 2012 / Windows 8.1 (build 9200) or later"
+        Write-Host ""
+        Write-Host "  Windows 7 / Server 2008 / Server 2008 R2 are explicitly NOT"
+        Write-Host "  supported by this script. Use a vendor-specific tool or run"
+        Write-Host "  the legacy WU reset recipe manually."
+        Write-Host ""
+        Write-Host "  Host        : $env:COMPUTERNAME"
+        Write-Host "  Report Time : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        Write-Host "================================================================="
+        Write-Host ""
+        exit 2
+    }
+
+    Write-Log "  OK: $caption (build $build) is at or above the minimum supported build ($minBuild)."
+}
 function Get-SystemInfo {
     Write-Log "=== Collecting System Information ==="
 
@@ -228,16 +277,10 @@ function Get-ESULicenseStatus {
     # ---- Identify ESU-eligible builds & their year coverage ----
     # Key: BuildNumber, Value: @(ProductLabel, @{ Year => ExpiryDate }, ESUCapable)
     $esuTable = @{
-        # Windows 7 / WS 2008 R2  (Build 7601)
-        "7601"  = @{
-            Label   = "Windows 7 / Server 2008 R2"
-            Capable = $true
-            Years   = @{
-                "Y1" = [datetime]"2020-01-14"
-                "Y2" = [datetime]"2021-01-12"
-                "Y3" = [datetime]"2022-01-11"
-            }
-        }
+        # NOTE: Windows 7 / Server 2008 R2 (build 7601) entries removed -
+        # those OSes are no longer supported by this script. The OS gate
+        # at startup will refuse to run before this table is consulted.
+
         # Windows Server 2012 (Build 9200)
         "9200"  = @{
             Label   = "Windows Server 2012"
@@ -472,8 +515,9 @@ function Test-WindowsEOL {
     # Key = BuildNumber, Value = @(ProductName, EndOfSupportDate)
     # Covers Windows 10 (all supported channels) and Windows 11
     $lifecycleTable = @{
-        # Windows 7 / Server 2008 R2
-        "7601"  = @("Windows 7 / Server 2008 R2",     [datetime]"2020-01-14")
+        # NOTE: Windows 7 / Server 2008 R2 (build 7601) removed - unsupported
+        # by this script (the OS gate at startup refuses to run on those builds).
+
         # Windows Server 2012
         "9200"  = @("Windows Server 2012",             [datetime]"2023-10-10")
         # Windows Server 2012 R2
@@ -2397,6 +2441,11 @@ Write-Log "############################################################"
 Write-Log " Remediate-PatchCompliance - Starting"
 Write-Log " Combined Check + Aggressive Remediation"
 Write-Log "############################################################"
+
+# OS gate - exits the script on unsupported Windows versions.
+# Runs BEFORE any Phase-1 check so we don't waste cycles (or produce
+# confusing output) on Win 7 / Server 2008 / Server 2008 R2.
+Test-SupportedOS
 
 try {
     # -----------------------------------------------------------------
