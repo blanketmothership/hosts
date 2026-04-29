@@ -2718,10 +2718,12 @@ function Write-ComplianceReport {
             } else { "-" }
             Write-Output ("  {0,-8} {1,-9} {2,-9} {3,-46} {4}" -f $r.Time, $r.Result, $durStr, $stepStr, $note)
         }
-        $okCt   = ($Script:Remediations | Where-Object { $_.Result -eq 'OK' }).Count
-        $failCt = ($Script:Remediations | Where-Object { $_.Result -eq 'FAILED' }).Count
-        $skipCt = ($Script:Remediations | Where-Object { $_.Result -eq 'SKIPPED' }).Count
-        $infoCt = ($Script:Remediations | Where-Object { $_.Result -eq 'INFO' }).Count
+        # V4.1: wrap with @() so .Count works under StrictMode when the
+        # filter returns a single object or no objects at all.
+        $okCt   = @($Script:Remediations | Where-Object { $_.Result -eq 'OK' }).Count
+        $failCt = @($Script:Remediations | Where-Object { $_.Result -eq 'FAILED' }).Count
+        $skipCt = @($Script:Remediations | Where-Object { $_.Result -eq 'SKIPPED' }).Count
+        $infoCt = @($Script:Remediations | Where-Object { $_.Result -eq 'INFO' }).Count
         Write-Output ""
         Row "Total Steps"      $Script:Remediations.Count
         Row "Successful"       $okCt
