@@ -73,12 +73,15 @@
 
     Author  : commander
     Repo    : https://github.com/blanketmothership/hosts
-    Version : v4  (gating layer; deprecated-DLL handling; reg.exe
+    Version : v4.1 (hotfix - wrap pipeline result in @() before .Count
+                   so the report tally works under StrictMode when the
+                   filter returns a scalar or null)
+              v4   (gating layer; deprecated-DLL handling; reg.exe
                    stdout redirected; old .bak prune; -InstallApplicable;
                    WU-scan-trumps-bookkeeping; before/after column trim)
-              v3  (reliability + observability pass after first prod run)
-              v2  (added OS gate; refuses Win 7 / Server 2008 / 2008 R2)
-              v1  (initial)
+              v3   (reliability + observability pass after first prod run)
+              v2   (added OS gate; refuses Win 7 / Server 2008 / 2008 R2)
+              v1   (initial)
 #>
 
 # ============================================================
@@ -2775,7 +2778,7 @@ function Write-ComplianceReport {
     # ---- Footer ----
     Write-Output ""
     Write-Output $divider
-    Write-Output "  Script  : Remediate-PatchComplianceV4.ps1"
+    Write-Output "  Script  : Remediate-PatchComplianceV4.1.ps1"
     Write-Output "  Phase 1/2 Status : $FinalStatus"
     Write-Output "  Phase 3 Outcome  : $RemediationOutcome"
     Write-Output "  Completed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
@@ -2787,7 +2790,7 @@ function Write-ComplianceReport {
 #  MAIN EXECUTION
 # ============================================================
 Write-Log "############################################################"
-Write-Log " Remediate-PatchCompliance - Starting  [v4]"
+Write-Log " Remediate-PatchCompliance - Starting  [v4.1]"
 Write-Log " Combined Check + Gated Remediation"
 Write-Log "############################################################"
 
